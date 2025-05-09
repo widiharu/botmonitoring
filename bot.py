@@ -12,7 +12,6 @@ Commands:
 • /delay <seconds>               – Set auto-update interval
 • /stop                          – Stop auto-updates & alerts
 • /announce <message>            – (Admin) Broadcast announcement
-
 Max nodes per chat: 5
 """
 
