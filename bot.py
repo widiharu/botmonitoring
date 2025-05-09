@@ -31,7 +31,7 @@ load_dotenv()
 TOKEN = os.getenv("TOKEN")
 API_KEY = os.getenv("API_KEY")
 DEFAULT_UPDATE_INTERVAL = 300  # Default auto update interval (in seconds)
-CORTENSOR_API = os.getenv("CORTENSOR_API", "https://dashboard-devnet3.cortensor.network")
+CORTENSOR_API = os.getenv("CORTENSOR_API", "https://dashboard-devnet4.cortensor.network")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 DATA_FILE = "data.json"
 MIN_AUTO_UPDATE_INTERVAL = 60  # Minimum auto update interval (in seconds)
