@@ -1,209 +1,134 @@
-#!/usr/bin/env python3
-"""
-Cortensor Node Monitoring Bot – Telegram Reply Keyboard Version
-
-Commands:
-• /add <wallet_address>[,label]  – Add node with optional label
-• /remove <wallet_address>       – Remove node
-• /list                          – List monitored nodes
-• /check                         – Check status now
-• /auto                          – Start auto-update
-• /alerts                        – Enable alerts
-• /delay <seconds>               – Set auto-update interval
-• /stop                          – Stop auto-updates & alerts
-• /announce <message>            – (Admin) Broadcast announcement
-
-Max nodes per chat: 5
-"""
-
 import os
-import json
 import time
 import logging
 import requests
-from datetime import datetime, timedelta
+from telegram import Update, ParseMode
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackContext
+from datetime import datetime
 from dotenv import load_dotenv
-from telegram import Update, ParseMode, ReplyKeyboardMarkup
-from telegram.ext import (
-    Updater, CommandHandler, MessageHandler, Filters,
-    ConversationHandler, CallbackContext
-)
 
-# Load .env
 load_dotenv()
-TOKEN = os.getenv("TOKEN")
-API_KEY = os.getenv("API_KEY")
-CORTENSOR_API = os.getenv("CORTENSOR_API")
-ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS","" ).split(",") if x]
-MAX_NODES = int(os.getenv("MAX_ADDRESS_PER_CHAT", 5))
-DEFAULT_INTERVAL = 300
-MIN_INTERVAL = 60
-DATA_FILE = "data.json"
 
-# States for ConversationHandlers
-ADD, = range(1)
+# Constants
+API_KEY = os.getenv("TELEGRAM_API_TOKEN")
+ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY")
+MAX_WALLETS = 5
 
 # Logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# Utilities
+# In-memory data store
+user_data = {}
 
-def load_data():
-    if os.path.exists(DATA_FILE):
-        return json.load(open(DATA_FILE))
-    return {}
+# Helper functions
+def shorten_address(address):
+    return f"{address[:6]}...{address[-4:]}"
 
-def save_data(d):
-    json.dump(d, open(DATA_FILE, "w"), indent=2)
-
-def get_chat(chat_id):
-    d = load_data()
-    return d.setdefault(str(chat_id), {"nodes": [], "interval": DEFAULT_INTERVAL})
-
-def update_chat(chat_id, data):
-    d = load_data()
-    d[str(chat_id)] = data
-    save_data(d)
-
-# Fetch helpers
-
-def fetch_txs(addr):
-    url = "https://api-sepolia.arbiscan.io/api"
-    params = {"module":"account","action":"txlist","address":addr,
-              "sort":"desc","page":1,"offset":100,"apikey":API_KEY}
+def get_eth_balance(address):
+    url = f"https://api.arbiscan.io/api?module=account&action=balance&address={address}&tag=latest&apikey={ETHERSCAN_API_KEY}"
     try:
-        res = requests.get(url, params=params, timeout=10).json().get("result", [])
-        return res if isinstance(res,list) else []
-    except:
+        response = requests.get(url).json()
+        if response['status'] == '1':
+            return round(int(response['result']) / 1e18, 4)
+        else:
+            return 0.0
+    except Exception as e:
+        logger.warning(f"Error getting balance: {e}")
+        return 0.0
+
+def fetch_transactions(address):
+    url = f"https://api.arbiscan.io/api?module=account&action=txlist&address={address}&startblock=0&endblock=99999999&sort=desc&apikey={ETHERSCAN_API_KEY}"
+    try:
+        response = requests.get(url).json()
+        if response['status'] == '1':
+            return response['result']
+        else:
+            return []
+    except Exception as e:
+        logger.warning(f"Error fetching transactions: {e}")
         return []
 
-# Command handlers
+def check_stall_status(txs):
+    ping_method = "0x5c36b186"
+    last_25 = txs[:25]
+    if all(tx['input'].startswith(ping_method) for tx in last_25):
+        return True
+    return False
 
-def start(update: Update, ctx: CallbackContext):
-    update.message.reply_text("Welcome! Use /help to see commands.")
+def get_last_successful_method_time(txs):
+    method_map = {
+        "0xf21a494b": "Commit",
+        "0x65c815a5": "Precommit",
+        "0xca6726d9": "Prepare",
+        "0x198e2b8a": "Create"
+    }
+    for tx in txs:
+        if tx['isError'] == '0' and tx['input'][:10] in method_map:
+            method_name = method_map[tx['input'][:10]]
+            timestamp = int(tx['timeStamp'])
+            ago = int((time.time() - timestamp) / 60)
+            return f"(last successful {method_name} transaction was {ago} mins ago)"
+    return "(no recent successful Commit/Precommit/Prepare/Create transaction)"
 
+# Bot Commands
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Welcome! Use /add <wallet>,<label> to start.")
 
-def help_cmd(update: Update, ctx: CallbackContext):
-    text = (
-        "/add <wallet>[,label] - Add node\n"
-        "/remove <wallet>     - Remove node\n"
-        "/list                - List nodes\n"
-        "/check               - Check now\n"
-        "/auto                - Start auto updates\n"
-        "/alerts              - Enable alerts\n"
-        "/delay <seconds>     - Set interval\n"
-        "/stop                - Stop jobs\n"
-        "/announce <msg>      - Admin broadcast\n"
-    )
-    update.message.reply_text(text)
-
-
-def add_cmd(update: Update, ctx: CallbackContext):
-    text = update.message.text.split(maxsplit=1)
-    if len(text)<2:
-        return update.message.reply_text("Usage: /add <wallet>[,label]")
-    arg = text[1].split(',',1)
-    wallet = arg[0]
-    label = arg[1] if len(arg)>1 else wallet[:6]
-    chat = get_chat(update.effective_chat.id)
-    if len(chat['nodes'])>=MAX_NODES:
-        return update.message.reply_text(f"Max {MAX_NODES} nodes reached.")
-    chat['nodes'].append({'wallet':wallet,'label':label})
-    update_chat(update.effective_chat.id, chat)
-    update.message.reply_text(f"Added {label}: {wallet}")
-
-
-def remove_cmd(update: Update, ctx: CallbackContext):
-    if len(ctx.args)!=1:
-        return update.message.reply_text("Usage: /remove <wallet>")
-    wallet = ctx.args[0]
-    chat = get_chat(update.effective_chat.id)
-    chat['nodes'] = [n for n in chat['nodes'] if n['wallet']!=wallet]
-    update_chat(update.effective_chat.id, chat)
-    update.message.reply_text(f"Removed {wallet}")
-
-
-def list_cmd(update: Update, ctx: CallbackContext):
-    nodes = get_chat(update.effective_chat.id)['nodes']
-    if not nodes:
-        return update.message.reply_text("No nodes.")
-    text = "".join(f"- {n['label']}: {n['wallet']}\n" for n in nodes)
-    update.message.reply_text(text)
-
-
-def check_cmd(update: Update, ctx: CallbackContext):
-    chat = get_chat(update.effective_chat.id)
-    for n in chat['nodes']:
-        txs = fetch_txs(n['wallet'])[:25]
-        stall = all(tx['input'].startswith('0x5c36b186') for tx in txs)
-        status = 'Stalled' if stall else 'Active'
-        update.message.reply_text(f"{n['label']} - {status}")
-
-
-def auto_cmd(update: Update, ctx: CallbackContext):
+async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    chat = get_chat(chat_id)
-    if 'job_auto' in ctx.chat_data:
-        return update.message.reply_text("Already running")
-    job = ctx.job_queue.run_repeating(lambda c: check_cmd(update,ctx), interval=chat['interval'], first=0)
-    ctx.chat_data['job_auto'] = job
-    update.message.reply_text("Auto update started.")
+    if chat_id not in user_data:
+        user_data[chat_id] = []
 
+    if len(user_data[chat_id]) >= MAX_WALLETS:
+        await update.message.reply_text("You've reached the maximum number of wallets (5).")
+        return
 
-def alerts_cmd(update: Update, ctx: CallbackContext):
+    try:
+        arg = ' '.join(context.args)
+        wallet, label = [x.strip() for x in arg.split(",")]
+        user_data[chat_id].append((wallet, label))
+        await update.message.reply_text(f"Wallet {label} added.")
+    except:
+        await update.message.reply_text("Invalid format. Use: /add <wallet>,<label>")
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if 'job_alerts' in ctx.chat_data:
-        return update.message.reply_text("Alerts already on")
-    job = ctx.job_queue.run_repeating(lambda c: check_cmd(update,ctx), interval=900, first=0)
-    ctx.chat_data['job_alerts'] = job
-    update.message.reply_text("Alerts enabled.")
+    if chat_id not in user_data or len(user_data[chat_id]) == 0:
+        await update.message.reply_text("No wallets added.")
+        return
 
+    message = "Auto Update\n\n"
+    for idx, (address, label) in enumerate(user_data[chat_id], 1):
+        txs = fetch_transactions(address)
+        balance = get_eth_balance(address)
+        stall = check_stall_status(txs)
+        last_method = get_last_successful_method_time(txs)
+        short = shorten_address(address)
 
-def delay_cmd(update: Update, ctx: CallbackContext):
-    if len(ctx.args)!=1 or not ctx.args[0].isdigit():
-        return update.message.reply_text("Usage: /delay <seconds>")
-    sec = int(ctx.args[0])
-    if sec<MIN_INTERVAL:
-        return update.message.reply_text(f"Min {MIN_INTERVAL}s")
-    chat = get_chat(update.effective_chat.id)
-    chat['interval'] = sec
-    update_chat(update.effective_chat.id, chat)
-    update.message.reply_text(f"Interval set to {sec}s")
+        message += (
+            f"🔑 {short} (Node {idx})\n"
+            f"💰 Balance: {balance} ETH | Status: 🟢 Online\n"
+            f"⏱️ Last Activity: {int((time.time() - int(txs[0]['timeStamp'])) / 60)} mins ago\n"
+            f"🩺 Health: 🟩 🟩 🟩 🟩 🟩\n"
+            f"⚠️ Stall: {'✅ Normal' if not stall else '❌ Stalled'}\n"
+            f"Transaction: {last_method}\n"
+            f"🔗 Arbiscan | 📈 Dashboard\n\n"
+        )
 
+    if len(message) > 4096:
+        for i in range(0, len(message), 4096):
+            await update.message.reply_text(message[i:i+4096], parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
-def stop_cmd(update: Update, ctx: CallbackContext):
-    for key in ['job_auto','job_alerts']:
-        job = ctx.chat_data.pop(key, None)
-        if job:
-            job.schedule_removal()
-    update.message.reply_text("Stopped all jobs.")
-
-
-def announce_cmd(update: Update, ctx: CallbackContext):
-    if update.effective_user.id not in ADMIN_IDS:
-        return update.message.reply_text("Unauthorized")
-    msg = update.message.text.split(' ',1)
-    if len(msg)<2:
-        return update.message.reply_text("Usage: /announce <msg>")
-    for cid in load_data().keys():
-        ctx.bot.send_message(int(cid), msg[1])
-    update.message.reply_text("Announcement sent.")
-
-
+# Main
 if __name__ == '__main__':
-    updater = Updater(TOKEN)
-    dp = updater.dispatcher
-    dp.add_handler(CommandHandler('start', start))
-    dp.add_handler(CommandHandler('help', help_cmd))
-    dp.add_handler(CommandHandler('add', add_cmd))
-    dp.add_handler(CommandHandler('remove', remove_cmd))
-    dp.add_handler(CommandHandler('list', list_cmd))
-    dp.add_handler(CommandHandler('check', check_cmd))
-    dp.add_handler(CommandHandler('auto', auto_cmd))
-    dp.add_handler(CommandHandler('alerts', alerts_cmd))
-    dp.add_handler(CommandHandler('delay', delay_cmd))
-    dp.add_handler(CommandHandler('stop', stop_cmd))
-    dp.add_handler(CommandHandler('announce', announce_cmd))
-    updater.start_polling()
-    updater.idle()
+    app = ApplicationBuilder().token(API_KEY).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("add", add))
+    app.add_handler(CommandHandler("status", status))
+    app.run_polling()
