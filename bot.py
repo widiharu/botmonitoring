@@ -4,13 +4,18 @@ import time
 from datetime import datetime, timedelta
 import requests
 from telegram import ParseMode
-from telegram.ext import (Updater, CommandHandler, CallbackContext)
+from telegram.ext import Updater, CommandHandler, CallbackContext
 
 # Load environment variables
-TOKEN = os.getenv("TOKEN")
-API_KEY = os.getenv("API_KEY")
-CORTENSOR_API = os.getenv("CORTENSOR_API")
-ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(',')))
+token = os.getenv("TOKEN")
+api_key = os.getenv("API_KEY")
+cortensor_api = os.getenv("CORTENSOR_API")
+# Parse ADMIN_IDS safely (allow empty)
+admin_ids_env = os.getenv("ADMIN_IDS", "").strip()
+if admin_ids_env:
+    ADMIN_IDS = [int(x) for x in admin_ids_env.split(',') if x.strip().isdigit()]
+else:
+    ADMIN_IDS = []
 
 # In-memory storage. For production, switch to a persistent DB.
 chats = {}  # chat_id: {"nodes": [{"address":..., "label":...}], "delay": 60}
@@ -31,7 +36,7 @@ def fetch_transactions(address, limit=25):
         'page': 1,
         'offset': limit,
         'sort': 'desc',
-        'apikey': API_KEY
+        'apikey': api_key
     }
     resp = requests.get(url, params=params).json()
     return resp.get('result', [])
@@ -48,7 +53,7 @@ METHODS = {
 def analyze_node(node):
     addr = node['address']
     txs = fetch_transactions(addr)
-    balance_resp = requests.get(f"{CORTENSOR_API}/balance/{addr}").json()
+    balance_resp = requests.get(f"{cortensor_api}/balance/{addr}").json()
     balance = balance_resp.get('balance', 0)
 
     now = datetime.utcnow()
@@ -65,7 +70,6 @@ def analyze_node(node):
     stall_flag = False
     if txs and all(tx['input'][:10] == '0x5c36b186' for tx in txs):
         stall_flag = True
-        # find recent non-PING success
         note = 'No recent non-PING tx found'
         for tx in txs:
             if tx['input'][:10] != '0x5c36b186' and tx.get('isError') == '0':
@@ -107,7 +111,7 @@ def send_status(context: CallbackContext):
             f"🩺 Health: {st['health']}\n"
             f"⚠️ Stall: {st['stall']}\n"
             f"Transaction: {st['tx_note']}\n"
-            f"🔗 <a href='https://arbiscan.io/address/{st['address']}'>Arbiscan</a> | 📈 <a href='{CORTENSOR_API}/dashboard/{st['address']}'>Dashboard</a>"
+            f"🔗 <a href='https://arbiscan.io/address/{st['address']}'>Arbiscan</a> | 📈 <a href='{cortensor_api}/dashboard/{st['address']}'>Dashboard</a>"
         )
         messages.append(msg)
 
@@ -148,7 +152,8 @@ def setdelay(update, context):
     cfg['delay'] = delay
     # reschedule job
     job_name = str(chat_id)
-    context.job_queue.get_jobs_by_name(job_name)[0].schedule_removal()
+    for job in context.job_queue.get_jobs_by_name(job_name):
+        job.schedule_removal()
     context.job_queue.run_repeating(send_status, interval=delay, first=0,
                                     context={'chat_id': chat_id}, name=job_name)
     update.message.reply_text(f"Update interval set to {delay} seconds.")
@@ -168,7 +173,11 @@ def announce(update, context):
     update.message.reply_text("Announcement sent.")
 
 if __name__ == '__main__':
-    updater = Updater(TOKEN, use_context=True)
+    if not token or not api_key or not cortensor_api:
+        logger.error("Environment variables TOKEN, API_KEY, and CORTENSOR_API must be set.")
+        exit(1)
+
+    updater = Updater(token, use_context=True)
     dp = updater.dispatcher
 
     # Register handlers
