@@ -5,6 +5,10 @@ from datetime import datetime, timedelta
 import requests
 from telegram import ParseMode
 from telegram.ext import Updater, CommandHandler, CallbackContext
+from dotenv import load_dotenv
+
+# Load .env file
+load_dotenv()
 
 # Load environment variables
 token = os.getenv("TOKEN")
