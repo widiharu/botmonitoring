@@ -324,7 +324,7 @@ def handle_delay(update: Update, ctx: CallbackContext):
         )
     except:
         update.message.reply_text(
-            f"❌ Enter a number ≥ {MIN_I nt}",
+            f"❌ Enter a number ≥ {MIN_INT}",
             reply_markup=make_menu(chat)
         )
     return ConversationHandler.END
