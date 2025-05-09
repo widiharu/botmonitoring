@@ -7,7 +7,7 @@ from telegram import Update, ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, ConversationHandler
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
-\# Load environment
+# Load environment
 TOKEN = os.getenv("TOKEN")
 API_KEY = os.getenv("API_KEY")
 CORTENSOR_API = os.getenv("CORTENSOR_API")
