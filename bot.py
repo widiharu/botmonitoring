@@ -564,7 +564,6 @@ def main():
     logger.info("Bot is starting...")
     dp.add_handler(CommandHandler("start", start_command))
     dp.add_handler(CommandHandler("auto_update", menu_auto_update))
-
 dp.add_handler(MessageHandler(Filters.regex("^Auto Update$"), menu_auto_update))
     dp.add_handler(CommandHandler("enable_alerts", menu_enable_alerts))
     dp.add_handler(MessageHandler(Filters.regex("^Enable Alerts$"), menu_enable_alerts))
